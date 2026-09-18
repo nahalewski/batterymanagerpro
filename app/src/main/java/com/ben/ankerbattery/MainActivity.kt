@@ -12,7 +12,10 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
@@ -33,8 +36,40 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
     private var lastLoggedAt = 0L
     private var currentTab = 0
     private val requestCodeBluetooth = 1001
+    private val RENDER_INTERVAL_MS = 2_000L
     private var showingIntro = false
     private var introVideoView: VideoView? = null
+    private var pageScroll: ScrollView? = null
+    private var lastScreenKey = ""
+
+    // Telemetry arrives every second; rebuilding the page that often kills scrolling and taps,
+    // so re-renders are rate-limited and deferred while the user is touching the page.
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private var lastRenderMs = 0L
+    private var renderScheduled = false
+    private var touchingPage = false
+    private var pendingRender = false
+    private val renderRunnable = Runnable {
+        renderScheduled = false
+        if (touchingPage) pendingRender = true else renderNow()
+    }
+
+    private fun renderNow() {
+        lastRenderMs = System.currentTimeMillis()
+        renderCurrentTab()
+    }
+
+    private fun requestRender() {
+        val screenKey = "$currentTab-${ble.telemetry.connected}"
+        if (screenKey != lastScreenKey) { renderNow(); return }   // screen change: show immediately
+        if (touchingPage) { pendingRender = true; return }
+        val wait = RENDER_INTERVAL_MS - (System.currentTimeMillis() - lastRenderMs)
+        if (wait <= 0) renderNow()
+        else if (!renderScheduled) {
+            renderScheduled = true
+            uiHandler.postDelayed(renderRunnable, wait)
+        }
+    }
 
     private val bg = Color.rgb(2, 14, 28)
     private val cyan = Color.rgb(0, 220, 255)
@@ -208,13 +243,37 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         }
     }
 
+    /** Scrollable page content with the bottom navigation pinned beneath it. */
     private fun setScrollable(content: LinearLayout) {
+        // Screens rebuild on every telemetry packet; keep the scroll offset when it's the same screen.
+        val screenKey = "$currentTab-${ble.telemetry.connected}"
+        val restoreY = if (screenKey == lastScreenKey) (pageScroll?.scrollY ?: 0) else 0
+        lastScreenKey = screenKey
         val scroll = ScrollView(this).apply {
             isFillViewport = true
             setBackgroundColor(bg)
             addView(content, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            if (restoreY > 0) post { scrollTo(0, restoreY) }
+            setOnTouchListener { _, ev ->
+                val up = ev.actionMasked == MotionEvent.ACTION_UP || ev.actionMasked == MotionEvent.ACTION_CANCEL
+                touchingPage = !up
+                if (up && pendingRender) {
+                    pendingRender = false
+                    uiHandler.postDelayed({ requestRender() }, 600L)   // let the fling settle first
+                }
+                false
+            }
         }
-        setContentView(scroll)
+        pageScroll = scroll
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(bg)
+            addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(bottomNav(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(dp(16), dp(6), dp(16), dp(12))
+            })
+        }
+        setContentView(page)
     }
 
     private fun pill(label: String, color: Int = cyan): TextView {
@@ -292,8 +351,6 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
 
         deviceContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(deviceContainer)
-        root.addView(space(18))
-        root.addView(bottomNav())
         setScrollable(root)
         renderDevices(ble.devices)
     }
@@ -485,8 +542,6 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
 
         statusText = pill(ble.status.ifBlank { "Connected" }, statusColor(ble.status))
         root.addView(statusText)
-        root.addView(space(18))
-        root.addView(bottomNav())
         setScrollable(root)
     }
 
@@ -787,8 +842,6 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
             }
         }
         root.addView(history)
-        root.addView(space(18))
-        root.addView(bottomNav())
         setScrollable(root)
     }
 
@@ -839,8 +892,6 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         root.addView(infoBlock("Log file", logger.historyFile().absolutePath + "\nExists: ${logger.hasHistory()}"))
         root.addView(space(12))
         root.addView(infoBlock("Device", if (t.address.isBlank()) "No connected device" else "${t.modelName}\n${t.deviceName}\n${t.address}"))
-        root.addView(space(18))
-        root.addView(bottomNav())
         setScrollable(root)
     }
 
@@ -862,8 +913,6 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         root.addView(neonButton("▶  Replay Intro Video") { showIntroVideo(fromSettings = true) })
         root.addView(space(10))
         root.addView(neonButton("Go to Home") { currentTab = 0; renderCurrentTab() })
-        root.addView(space(18))
-        root.addView(bottomNav())
         setScrollable(root)
     }
 
@@ -941,7 +990,7 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
     override fun onTelemetryChanged(telemetry: BatteryTelemetry) {
         runOnUiThread {
             // Home tab follows the connection state: dashboard while connected, scanner otherwise.
-            renderCurrentTab()
+            requestRender()
             val now = telemetry.lastUpdatedMs
             if (now > 0L && now - lastLoggedAt >= 5_000L) {
                 lastLoggedAt = now
