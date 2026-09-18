@@ -26,6 +26,8 @@ import com.ben.ankerbattery.protocol.ecoflow.EcoFlowSession
 import com.ben.ankerbattery.protocol.goalzero.GoalZeroProtocol
 import com.ben.ankerbattery.protocol.goalzero.GoalZeroSession
 import com.ben.ankerbattery.util.NotificationHelper
+import com.ben.ankerbattery.widget.BatteryCardWidgetProvider
+import com.ben.ankerbattery.widget.BatteryFleetWidgetProvider
 import com.ben.ankerbattery.widget.BatteryWidgetProvider
 import java.util.ArrayDeque
 
@@ -97,12 +99,17 @@ class AnkerBleManager(private val context: Context) {
         listener?.onTelemetryChanged(value)
         try {
             BatteryWidgetProvider.updateAllWidgets(context, value)
+            BatteryCardWidgetProvider.updateAllWidgets(context, value)
+            BatteryFleetWidgetProvider.updateAllWidgets(context, value, deviceList)
         } catch (_: Throwable) {}
     }
 
     private fun setDevices(value: List<FoundDevice>) {
         deviceList = value
         listener?.onDevicesChanged(value)
+        try {
+            BatteryFleetWidgetProvider.updateAllWidgets(context, currentTelemetry, value)
+        } catch (_: Throwable) {}
     }
 
     fun dispatchCurrentState() {

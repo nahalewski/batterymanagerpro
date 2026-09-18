@@ -1,5 +1,9 @@
 <resources>
     <string name="app_name">Battery Manager</string>
-    <string name="widget_name">Battery Manager</string>
-    <string name="widget_description">Displays real-time battery level and wattage telemetry.</string>
+    <string name="widget_name">Battery Gauge (Adaptive)</string>
+    <string name="widget_description">Shows battery indicator sprite on small sizes and actual 3D hardware render when enlarged.</string>
+    <string name="widget_card_name">Battery Card (Showcase)</string>
+    <string name="widget_card_description">Hardware UI showcase with realistic 3D render, port telemetry, and power flow.</string>
+    <string name="widget_fleet_name">Battery Fleet (Multi-Brand)</string>
+    <string name="widget_fleet_description">Scrollable list of all detected batteries, grouped by brand (Anker, UGREEN, EcoFlow, BLUETTI, Zendure, Goal Zero).</string>
 </resources>
