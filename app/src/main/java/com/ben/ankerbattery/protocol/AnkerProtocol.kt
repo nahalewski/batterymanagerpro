@@ -19,6 +19,10 @@ object AnkerProtocol {
         SOLIX_C200,
         UGREEN_NEXODE_165W,
         UGREEN_GENERIC,
+        BLUETTI_POWER_STATION,
+        ZENDURE_SOLARFLOW,
+        ECOFLOW_DELTA,
+        GOAL_ZERO_YETI,
         UNKNOWN;
 
         val isPrime: Boolean
@@ -26,6 +30,18 @@ object AnkerProtocol {
 
         val isUgreen: Boolean
             get() = this == UGREEN_NEXODE_165W || this == UGREEN_GENERIC
+
+        val isBluetti: Boolean
+            get() = this == BLUETTI_POWER_STATION
+
+        val isZendure: Boolean
+            get() = this == ZENDURE_SOLARFLOW
+
+        val isEcoFlow: Boolean
+            get() = this == ECOFLOW_DELTA
+
+        val isGoalZero: Boolean
+            get() = this == GOAL_ZERO_YETI
     }
 
     val IDENTIFIER_SERVICE: UUID = UUID.fromString("0000ff09-0000-1000-8000-00805f9b34fb")
@@ -39,12 +55,20 @@ object AnkerProtocol {
                n.contains("c200") || n.contains("c300") || n.contains("ugreen") ||
                n.contains("nexode") || n.contains("pb72") || n.contains("pb54") ||
                IDENTIFIER_SERVICE in serviceUuids ||
-               com.ben.ankerbattery.protocol.ugreen.UgreenProtocol.isUgreenLike(name, serviceUuids)
+               com.ben.ankerbattery.protocol.ugreen.UgreenProtocol.isUgreenLike(name, serviceUuids) ||
+               com.ben.ankerbattery.protocol.bluetti.BluettiProtocol.isBluetti(name, serviceUuids) ||
+               com.ben.ankerbattery.protocol.zendure.ZendureProtocol.isZendure(name, serviceUuids) ||
+               com.ben.ankerbattery.protocol.ecoflow.EcoFlowProtocol.isEcoFlow(name, serviceUuids) ||
+               com.ben.ankerbattery.protocol.goalzero.GoalZeroProtocol.isGoalZero(name, serviceUuids)
     }
 
     fun classifyDevice(name: String?): DeviceType {
         val n = name.orEmpty().trim().lowercase(Locale.US)
         return when {
+            com.ben.ankerbattery.protocol.bluetti.BluettiProtocol.isBluetti(n, emptyList()) -> DeviceType.BLUETTI_POWER_STATION
+            com.ben.ankerbattery.protocol.zendure.ZendureProtocol.isZendure(n, emptyList()) -> DeviceType.ZENDURE_SOLARFLOW
+            com.ben.ankerbattery.protocol.ecoflow.EcoFlowProtocol.isEcoFlow(n, emptyList()) -> DeviceType.ECOFLOW_DELTA
+            com.ben.ankerbattery.protocol.goalzero.GoalZeroProtocol.isGoalZero(n, emptyList()) -> DeviceType.GOAL_ZERO_YETI
             n.contains("165w") || n.contains("pb726") || (n.contains("ugreen") && (n.contains("retractable") || n.contains("20000") || n.contains("20k"))) -> DeviceType.UGREEN_NEXODE_165W
             n.contains("ugreen") || n.contains("nexode") || n.contains("pb72") || n.contains("pb54") -> DeviceType.UGREEN_GENERIC
             n.contains("27k") || n.contains("a1379") || n.contains("27650") -> DeviceType.PRIME_27K
@@ -57,6 +81,10 @@ object AnkerProtocol {
 
     fun modelNameFor(type: DeviceType): String {
         return when (type) {
+            DeviceType.BLUETTI_POWER_STATION -> "BLUETTI Power Station"
+            DeviceType.ZENDURE_SOLARFLOW -> "Zendure SolarFlow / SuperBase"
+            DeviceType.ECOFLOW_DELTA -> "EcoFlow DELTA / RIVER"
+            DeviceType.GOAL_ZERO_YETI -> "Goal Zero Yeti Power Station"
             DeviceType.UGREEN_NEXODE_165W -> "UGREEN Nexode 20000mAh 165W"
             DeviceType.UGREEN_GENERIC -> "UGREEN Power Bank"
             DeviceType.PRIME_20K -> "20K Prime Power Bank"

@@ -17,6 +17,14 @@ import com.ben.ankerbattery.protocol.AnkerSession
 import com.ben.ankerbattery.protocol.BatterySession
 import com.ben.ankerbattery.protocol.ugreen.UgreenProtocol
 import com.ben.ankerbattery.protocol.ugreen.UgreenSession
+import com.ben.ankerbattery.protocol.bluetti.BluettiProtocol
+import com.ben.ankerbattery.protocol.bluetti.BluettiSession
+import com.ben.ankerbattery.protocol.zendure.ZendureProtocol
+import com.ben.ankerbattery.protocol.zendure.ZendureSession
+import com.ben.ankerbattery.protocol.ecoflow.EcoFlowProtocol
+import com.ben.ankerbattery.protocol.ecoflow.EcoFlowSession
+import com.ben.ankerbattery.protocol.goalzero.GoalZeroProtocol
+import com.ben.ankerbattery.protocol.goalzero.GoalZeroSession
 import com.ben.ankerbattery.widget.BatteryWidgetProvider
 import java.util.ArrayDeque
 
@@ -239,10 +247,13 @@ class AnkerBleManager(private val context: Context) {
     }
 
     private fun createSessionFor(type: AnkerProtocol.DeviceType): BatterySession {
-        return if (type.isUgreen) {
-            UgreenSession(type)
-        } else {
-            AnkerSession(type)
+        return when {
+            type.isBluetti -> BluettiSession(type)
+            type.isZendure -> ZendureSession(type)
+            type.isEcoFlow -> EcoFlowSession(type)
+            type.isGoalZero -> GoalZeroSession(type)
+            type.isUgreen -> UgreenSession(type)
+            else -> AnkerSession(type)
         }
     }
 
@@ -369,18 +380,37 @@ class AnkerBleManager(private val context: Context) {
             }
             val characteristics = gatt.services.flatMap { it.characteristics }
             val currentDevice = lastFoundDevice
-            if (currentDevice?.type?.isUgreen == true) {
-                telemetryCharacteristic = characteristics.firstOrNull {
-                    it.uuid == UgreenProtocol.UGREEN_NOTIFY_CHAR ||
-                    it.uuid == UgreenProtocol.UGREEN_ALT_NOTIFY_CHAR ||
-                    it.uuid == UgreenProtocol.BATTERY_LEVEL_CHAR
+            when {
+                currentDevice?.type?.isBluetti == true -> {
+                    telemetryCharacteristic = characteristics.firstOrNull { it.uuid == BluettiProtocol.NOTIFY_CHAR }
+                    commandCharacteristic = characteristics.firstOrNull { it.uuid == BluettiProtocol.WRITE_CHAR } ?: telemetryCharacteristic
                 }
-                commandCharacteristic = characteristics.firstOrNull {
-                    it.uuid == UgreenProtocol.UGREEN_COMMAND_CHAR
-                } ?: telemetryCharacteristic
-            } else {
-                telemetryCharacteristic = characteristics.firstOrNull { it.uuid == AnkerProtocol.TELEMETRY_CHARACTERISTIC }
-                commandCharacteristic = characteristics.firstOrNull { it.uuid == AnkerProtocol.COMMAND_CHARACTERISTIC }
+                currentDevice?.type?.isZendure == true -> {
+                    telemetryCharacteristic = characteristics.firstOrNull { it.uuid == ZendureProtocol.NOTIFY_CHAR }
+                    commandCharacteristic = characteristics.firstOrNull { it.uuid == ZendureProtocol.WRITE_CHAR } ?: telemetryCharacteristic
+                }
+                currentDevice?.type?.isEcoFlow == true -> {
+                    telemetryCharacteristic = characteristics.firstOrNull { it.uuid == EcoFlowProtocol.NOTIFY_CHAR }
+                    commandCharacteristic = characteristics.firstOrNull { it.uuid == EcoFlowProtocol.WRITE_CHAR } ?: telemetryCharacteristic
+                }
+                currentDevice?.type?.isGoalZero == true -> {
+                    telemetryCharacteristic = characteristics.firstOrNull { it.uuid == GoalZeroProtocol.NOTIFY_CHAR }
+                    commandCharacteristic = characteristics.firstOrNull { it.uuid == GoalZeroProtocol.WRITE_CHAR } ?: telemetryCharacteristic
+                }
+                currentDevice?.type?.isUgreen == true -> {
+                    telemetryCharacteristic = characteristics.firstOrNull {
+                        it.uuid == UgreenProtocol.UGREEN_NOTIFY_CHAR ||
+                        it.uuid == UgreenProtocol.UGREEN_ALT_NOTIFY_CHAR ||
+                        it.uuid == UgreenProtocol.BATTERY_LEVEL_CHAR
+                    }
+                    commandCharacteristic = characteristics.firstOrNull {
+                        it.uuid == UgreenProtocol.UGREEN_COMMAND_CHAR
+                    } ?: telemetryCharacteristic
+                }
+                else -> {
+                    telemetryCharacteristic = characteristics.firstOrNull { it.uuid == AnkerProtocol.TELEMETRY_CHARACTERISTIC }
+                    commandCharacteristic = characteristics.firstOrNull { it.uuid == AnkerProtocol.COMMAND_CHARACTERISTIC }
+                }
             }
             val notify = telemetryCharacteristic
             if (notify == null || commandCharacteristic == null) {

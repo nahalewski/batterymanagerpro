@@ -220,6 +220,10 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         return ImageView(this).apply {
             val res = when (type) {
                 AnkerProtocol.DeviceType.UGREEN_NEXODE_165W, AnkerProtocol.DeviceType.UGREEN_GENERIC -> R.drawable.ugreen_nexode_20k
+                AnkerProtocol.DeviceType.BLUETTI_POWER_STATION -> R.drawable.solix_c200
+                AnkerProtocol.DeviceType.ZENDURE_SOLARFLOW -> R.drawable.solix_c200
+                AnkerProtocol.DeviceType.ECOFLOW_DELTA -> R.drawable.solix_c200
+                AnkerProtocol.DeviceType.GOAL_ZERO_YETI -> R.drawable.solix_c200
                 AnkerProtocol.DeviceType.PRIME_20K -> R.drawable.prime_20k
                 AnkerProtocol.DeviceType.PRIME_26K -> R.drawable.prime_26k
                 AnkerProtocol.DeviceType.PRIME_27K -> R.drawable.prime_27k
