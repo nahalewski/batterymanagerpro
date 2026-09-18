@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Battery Manager</string>
+    <string name="widget_name">Battery Manager</string>
+    <string name="widget_description">Displays real-time battery level and wattage telemetry.</string>
+</resources>
