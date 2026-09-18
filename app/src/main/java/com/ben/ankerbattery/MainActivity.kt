@@ -3,11 +3,13 @@ package com.ben.ankerbattery
 import android.Manifest
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.content.Context
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
@@ -30,6 +32,8 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
     private var lastLoggedAt = 0L
     private var currentTab = 0
     private val requestCodeBluetooth = 1001
+    private var showingIntro = false
+    private var introVideoView: VideoView? = null
 
     private val bg = Color.rgb(2, 14, 28)
     private val cyan = Color.rgb(0, 220, 255)
@@ -47,16 +51,105 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         ble = AnkerBleManager(this)
         logger = UsageLogger(this)
         ble.listener = this
-        renderCurrentTab()
-        ble.dispatchCurrentState()
-        ensurePermissionThenScan()
+
+        val prefs = getSharedPreferences("battery_manager_prefs", Context.MODE_PRIVATE)
+        val hasSeenIntro = prefs.getBoolean("has_seen_intro_v1", false)
+
+        if (!hasSeenIntro) {
+            showIntroVideo(fromSettings = false)
+        } else {
+            renderCurrentTab()
+            ble.dispatchCurrentState()
+            ensurePermissionThenScan()
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        if (!ble.telemetry.connected) {
+        if (showingIntro) {
+            introVideoView?.start()
+        } else if (!ble.telemetry.connected) {
             ensurePermissionThenScan()
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (showingIntro) {
+            try { introVideoView?.pause() } catch (_: Throwable) {}
+        }
+    }
+
+    private fun showIntroVideo(fromSettings: Boolean = false) {
+        showingIntro = true
+        val frame = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+        }
+
+        val videoView = VideoView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+            )
+        }
+        introVideoView = videoView
+        frame.addView(videoView)
+
+        val finishIntro = {
+            if (showingIntro) {
+                showingIntro = false
+                try { videoView.stopPlayback() } catch (_: Throwable) {}
+                introVideoView = null
+                getSharedPreferences("battery_manager_prefs", Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean("has_seen_intro_v1", true)
+                    .apply()
+                renderCurrentTab()
+                ble.dispatchCurrentState()
+                if (!fromSettings) {
+                    ensurePermissionThenScan()
+                }
+            }
+        }
+
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(36), dp(20), dp(16))
+            addView(text("BATTERY MANAGER", 13f, true, cyanSoft), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+            val skipBtn = text("Skip ›", 14f, true, white).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(16), dp(8), dp(16), dp(8))
+                background = roundRect(Color.argb(160, 10, 30, 50), cyan, 1, 16)
+                setOnClickListener { finishIntro() }
+            }
+            addView(skipBtn)
+        }
+        frame.addView(topBar, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP))
+
+        videoView.setOnCompletionListener {
+            finishIntro()
+        }
+
+        videoView.setOnErrorListener { _, _, _ ->
+            finishIntro()
+            true
+        }
+
+        try {
+            val videoUri = Uri.parse("android.resource://$packageName/${R.raw.intro_video}")
+            videoView.setVideoURI(videoUri)
+            videoView.setOnPreparedListener { mp ->
+                mp.isLooping = false
+                videoView.start()
+            }
+        } catch (_: Throwable) {
+            finishIntro()
+        }
+
+        setContentView(frame)
     }
 
     override fun onDestroy() {
@@ -680,6 +773,8 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         root.addView(infoBlock("Connection status", ble.status))
         root.addView(space(12))
         root.addView(neonButton("Request Bluetooth permission") { ensurePermissionThenScan() })
+        root.addView(space(10))
+        root.addView(neonButton("▶  Replay Intro Video") { showIntroVideo(fromSettings = true) })
         root.addView(space(10))
         root.addView(neonButton("Go to Home") { currentTab = 0; renderCurrentTab() })
         root.addView(space(18))
