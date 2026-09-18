@@ -49,6 +49,14 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         ble.listener = this
         renderCurrentTab()
         ble.dispatchCurrentState()
+        ensurePermissionThenScan()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!ble.telemetry.connected) {
+            ensurePermissionThenScan()
+        }
     }
 
     override fun onDestroy() {
@@ -199,19 +207,34 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
     }
 
     private fun ensurePermissionThenScan() {
-        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        val permissions = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         } else {
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
         val missing = permissions.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isEmpty()) ble.startScan() else requestPermissions(missing.toTypedArray(), requestCodeBluetooth)
+        if (missing.isEmpty()) {
+            ble.startScan()
+        } else {
+            requestPermissions(missing.toTypedArray(), requestCodeBluetooth)
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == requestCodeBluetooth) {
-            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) ble.startScan()
+            val btGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
+                    checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            } else {
+                checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            }
+            if (btGranted) ble.startScan()
             else ble.reportPermissionDenied()
         }
     }
@@ -285,9 +308,8 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         root = baseScreen()
         val subtitle = if (t.connected) "${t.deviceName}  •  Connected" else t.deviceName
         root.addView(titleBar(t.modelName, subtitle, true) {
-            ble.disconnect()
             currentTab = 0
-            renderCurrentTab()
+            showScanner()
         })
         root.addView(space(12))
 
@@ -321,6 +343,11 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         root.addView(hero)
         root.addView(space(12))
 
+        if (t.updateAvailable) {
+            root.addView(firmwareDisclaimerCard(t))
+            root.addView(space(12))
+        }
+
         val powerRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         powerRow.addView(metricCard("↓", "Total Input", watts(t.totalInputW), cyan), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(5) })
         powerRow.addView(metricCard("↑", "Total Output", watts(t.totalOutputW), cyan), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(5) })
@@ -336,11 +363,57 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
 
         statusText = pill(ble.status.ifBlank { "Connected" }, statusColor(ble.status))
         root.addView(statusText)
-        root.addView(space(12))
-        root.addView(neonButton("⛓  Disconnect", true) { ble.disconnect(); currentTab = 0; renderCurrentTab() })
         root.addView(space(18))
         root.addView(bottomNav())
         setScrollable(root)
+    }
+
+    private fun firmwareDisclaimerCard(t: BatteryTelemetry): LinearLayout {
+        val officialApp = t.officialAppName ?: "Official Manufacturer App"
+        val pkg = t.officialAppPackage
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = roundRect(Color.rgb(38, 22, 6), amber, 1, 20)
+
+            val headerRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            headerRow.addView(text("⚠️  FIRMWARE UPDATE DETECTED", 14f, true, amber), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            headerRow.addView(pill("NEW", amber))
+            addView(headerRow)
+            addView(space(8))
+
+            addView(text(
+                "A new firmware update is available for ${t.modelName} (Current: ${t.firmwareVersion ?: "v1.0.0"}).",
+                13f, true, white
+            ))
+            addView(space(6))
+            addView(text(
+                "SAFETY DISCLAIMER: To protect your battery hardware, thermal safety systems, and manufacturer warranty, third-party firmware flashing is disabled. Please perform all firmware updates directly through the official $officialApp app.",
+                12f, false, muted
+            ))
+            addView(space(12))
+
+            addView(neonButton("Open $officialApp") {
+                val launchIntent = if (pkg != null && packageManager.getLaunchIntentForPackage(pkg) != null) {
+                    packageManager.getLaunchIntentForPackage(pkg)
+                } else if (pkg != null) {
+                    android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://play.google.com/store/apps/details?id=$pkg"))
+                } else null
+
+                if (launchIntent != null) {
+                    try {
+                        startActivity(launchIntent)
+                    } catch (_: Throwable) {
+                        Toast.makeText(this@MainActivity, "Could not launch $officialApp", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(this@MainActivity, "Please install the official $officialApp app", Toast.LENGTH_SHORT).show()
+                }
+            })
+        }
     }
 
     private fun buildBatteryHeroImage(type: AnkerProtocol.DeviceType, t: BatteryTelemetry): FrameLayout {
@@ -573,7 +646,7 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
             addView(space(10))
             addView(neonButton("Stop scan") { ble.stopScan(); Toast.makeText(this@MainActivity, "Scan stopped", Toast.LENGTH_SHORT).show(); renderCurrentTab() })
             addView(space(10))
-            addView(neonButton("Disconnect", true) { ble.disconnect(); currentTab = 0; renderCurrentTab() })
+            addView(neonButton("Rescan & Auto-Connect") { ble.startScan(); Toast.makeText(this@MainActivity, "Scanning for batteries to auto-connect...", Toast.LENGTH_SHORT).show(); renderCurrentTab() })
             addView(space(10))
             addView(neonButton("Clear saved history") {
                 logger.clear()

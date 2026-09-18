@@ -8,8 +8,8 @@ data class PortReading(
 )
 
 data class BatteryTelemetry(
-    val deviceName: String = "Anker device",
-    val modelName: String = "Anker battery",
+    val deviceName: String = "Battery device",
+    val modelName: String = "Battery",
     val address: String = "",
     val connected: Boolean = false,
     val batteryPercent: Double? = null,
@@ -20,5 +20,9 @@ data class BatteryTelemetry(
     val ports: List<PortReading> = emptyList(),
     val lastPacketHex: String = "",
     val packetsReceived: Long = 0,
-    val lastUpdatedMs: Long = 0
+    val lastUpdatedMs: Long = 0,
+    val firmwareVersion: String? = null,
+    val updateAvailable: Boolean = false,
+    val officialAppName: String? = null,
+    val officialAppPackage: String? = null
 )

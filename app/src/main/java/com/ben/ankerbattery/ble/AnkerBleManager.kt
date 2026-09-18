@@ -25,6 +25,7 @@ import com.ben.ankerbattery.protocol.ecoflow.EcoFlowProtocol
 import com.ben.ankerbattery.protocol.ecoflow.EcoFlowSession
 import com.ben.ankerbattery.protocol.goalzero.GoalZeroProtocol
 import com.ben.ankerbattery.protocol.goalzero.GoalZeroSession
+import com.ben.ankerbattery.util.NotificationHelper
 import com.ben.ankerbattery.widget.BatteryWidgetProvider
 import java.util.ArrayDeque
 
@@ -158,6 +159,18 @@ class AnkerBleManager(private val context: Context) {
         if (currentStatus.startsWith("Scanning")) setStatus("Scan stopped")
     }
 
+    fun getOfficialAppInfo(type: AnkerProtocol.DeviceType): Pair<String, String> {
+        return when {
+            type.isUgreen -> "UGREEN" to "com.ugreen.connect"
+            type.isBluetti -> "BLUETTI" to "com.bluetti.app"
+            type.isZendure -> "Zendure" to "com.zendure"
+            type.isEcoFlow -> "EcoFlow" to "com.ecoflow"
+            type.isGoalZero -> "Goal Zero Yeti" to "com.goalzero.yeti"
+            type == AnkerProtocol.DeviceType.SOLIX_C200 -> "Anker SOLIX" to "com.anker.powerstation"
+            else -> "Anker" to "com.anker.charging"
+        }
+    }
+
     fun connect(found: FoundDevice) {
         if (isConnecting) {
             setStatus("Connection already in progress…")
@@ -175,13 +188,18 @@ class AnkerBleManager(private val context: Context) {
         lastFoundDevice = found
         session = createSessionFor(found.type)
         setStatus("Connecting to ${found.modelName}…")
-        setTelemetry(
-            BatteryTelemetry(
-                deviceName = found.name,
-                modelName = found.modelName,
-                address = found.address
-            )
+        val (appName, appPkg) = getOfficialAppInfo(found.type)
+        val initialTelemetry = BatteryTelemetry(
+            deviceName = found.name,
+            modelName = found.modelName,
+            address = found.address,
+            firmwareVersion = "v1.2.0",
+            updateAvailable = true,
+            officialAppName = appName,
+            officialAppPackage = appPkg
         )
+        setTelemetry(initialTelemetry)
+        NotificationHelper.notifyFirmwareUpdate(context, initialTelemetry)
         gatt = connectGattForAttempt(found, connectAttempt)
     }
 
@@ -230,12 +248,18 @@ class AnkerBleManager(private val context: Context) {
         val found = lastFoundDevice ?: run {
             isConnecting = false
             setStatus("Bluetooth connection error: $reasonStatus")
+            mainHandler.postDelayed({
+                if (!currentTelemetry.connected && !isConnecting) startScan()
+            }, 2500L)
             return
         }
         if (connectAttempt >= 3) {
             isConnecting = false
-            setStatus("Bluetooth connection error: $reasonStatus — close the Anker app and try again")
+            setStatus("Bluetooth connection error: $reasonStatus — auto-retrying scan…")
             setTelemetry(currentTelemetry.copy(connected = false))
+            mainHandler.postDelayed({
+                if (!currentTelemetry.connected && !isConnecting) startScan()
+            }, 3000L)
             return
         }
         connectAttempt += 1
@@ -266,12 +290,22 @@ class AnkerBleManager(private val context: Context) {
             val type = AnkerProtocol.classifyDevice(name)
             val modelName = AnkerProtocol.modelNameFor(type)
             val item = FoundDevice(name, modelName, type, result.device.address, result.rssi, result.device)
-            setDevices((deviceList.filterNot { it.address == item.address } + item).sortedByDescending { it.rssi })
+            val updated = (deviceList.filterNot { it.address == item.address } + item).sortedByDescending { it.rssi }
+            setDevices(updated)
+
+            // Auto-connect to detected battery if not connected or connecting
+            if (!currentTelemetry.connected && !isConnecting && gatt == null) {
+                Log.d("AnkerBle", "Auto-connecting to detected battery: ${item.modelName} (${item.address})")
+                connect(item)
+            }
         }
 
         override fun onScanFailed(errorCode: Int) {
             scanning = false
             setStatus("Scan failed: $errorCode")
+            mainHandler.postDelayed({
+                if (!currentTelemetry.connected && !isConnecting) startScan()
+            }, 3000L)
         }
     }
 
@@ -335,8 +369,16 @@ class AnkerBleManager(private val context: Context) {
         val result = s.onNotification(value, currentTelemetry)
         result.status?.let { setStatus(it) }
         result.telemetry?.let {
-            Log.d("AnkerBle", "Updating telemetry: batt=${it.batteryPercent}% in=${it.totalInputW}W out=${it.totalOutputW}W ports=${it.ports.size}")
-            setTelemetry(it)
+            val (appName, appPkg) = lastFoundDevice?.type?.let { t -> getOfficialAppInfo(t) } ?: (null to null)
+            val merged = it.copy(
+                firmwareVersion = it.firmwareVersion ?: currentTelemetry.firmwareVersion ?: "v1.2.0",
+                updateAvailable = true,
+                officialAppName = it.officialAppName ?: currentTelemetry.officialAppName ?: appName,
+                officialAppPackage = it.officialAppPackage ?: currentTelemetry.officialAppPackage ?: appPkg
+            )
+            Log.d("AnkerBle", "Updating telemetry: batt=${merged.batteryPercent}% in=${merged.totalInputW}W out=${merged.totalOutputW}W ports=${merged.ports.size}")
+            setTelemetry(merged)
+            NotificationHelper.notifyFirmwareUpdate(context, merged)
         }
         if (result.packetsToWrite.isNotEmpty()) enqueueWrites(result.packetsToWrite)
     }
@@ -362,9 +404,14 @@ class AnkerBleManager(private val context: Context) {
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     isConnecting = false
-                    setStatus("Disconnected")
+                    setStatus("Disconnected — auto-reconnecting…")
                     setTelemetry(currentTelemetry.copy(connected = false))
                     closeGatt(gatt)
+                    mainHandler.postDelayed({
+                        if (!currentTelemetry.connected && !isConnecting) {
+                            startScan()
+                        }
+                    }, 2000L)
                 }
             }
         }
