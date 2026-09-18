@@ -305,7 +305,9 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
             "4303" -> listOfNotNull(portRecord(p, "a2", "C1"), portRecord(p, "a3", "C2"), portRecord(p, "a4", "USB-A"), portRecord(p, "a5", "DC OUT"))
             else -> emptyList()
         }
-        val battery = if (cmd == "4a00") p.intVal("a6")?.takeIf { it in 0..100 }?.toDouble() else null
+        // Battery % is not carried in either packet on this firmware (a6 is a flag, not SoC —
+        // the device read 100% while a6 == 1). Leave it unknown rather than show a wrong value.
+        val battery: Double? = null
         val totalIn = ports.filter { it.status == 2 }.sumOf { it.reading.watts ?: 0.0 }
         val totalOut = ports.filter { it.status == 1 }.sumOf { it.reading.watts ?: 0.0 }
 

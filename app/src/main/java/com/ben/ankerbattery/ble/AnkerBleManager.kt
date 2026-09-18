@@ -40,7 +40,10 @@ class AnkerBleManager(private val context: Context) {
         val type: AnkerProtocol.DeviceType,
         val address: String,
         val rssi: Int,
-        val device: BluetoothDevice
+        /** Null for a remembered device that has not been seen since the app started. */
+        val device: BluetoothDevice? = null,
+        val lastSeenMs: Long = 0L,
+        val inRange: Boolean = true
     )
 
     interface Listener {
@@ -71,6 +74,53 @@ class AnkerBleManager(private val context: Context) {
     // Connecting is tap-driven; only the explicit "Rescan & Auto-Connect" action sets this.
     private var autoConnectOnNextScan = false
 
+    // Remembered batteries: shown on the scanner before they advertise again.
+    private val knownPrefs = context.getSharedPreferences("known_batteries", Context.MODE_PRIVATE)
+    private var lastCacheWriteMs = 0L
+
+    init {
+        deviceList = loadKnownDevices()
+    }
+
+    private fun loadKnownDevices(): List<FoundDevice> =
+        knownPrefs.getStringSet(KEY_KNOWN, emptySet()).orEmpty().mapNotNull { entry ->
+            val f = entry.split('|')
+            if (f.size < 5) return@mapNotNull null
+            val type = runCatching { AnkerProtocol.DeviceType.valueOf(f[1]) }.getOrDefault(AnkerProtocol.DeviceType.UNKNOWN)
+            FoundDevice(f[2], f[3], type, f[0], OUT_OF_RANGE_RSSI, null, f[4].toLongOrNull() ?: 0L, inRange = false)
+        }.sortedByDescending { it.lastSeenMs }
+
+    private fun saveKnownDevices(devices: List<FoundDevice>) {
+        val set = devices.map { "${it.address}|${it.type.name}|${it.name}|${it.modelName}|${it.lastSeenMs}" }.toHashSet()
+        knownPrefs.edit().putStringSet(KEY_KNOWN, set).apply()
+        lastCacheWriteMs = System.currentTimeMillis()
+    }
+
+    fun forgetKnownDevices() {
+        knownPrefs.edit().remove(KEY_KNOWN).apply()
+        setDevices(deviceList.filter { it.inRange })
+    }
+
+    private fun sortDevices(devices: List<FoundDevice>): List<FoundDevice> =
+        devices.sortedWith(
+            compareByDescending<FoundDevice> { it.inRange }
+                .thenByDescending { if (it.inRange) it.rssi else Int.MIN_VALUE }
+                .thenByDescending { it.lastSeenMs }
+        )
+
+    /** Flags devices that stopped advertising as out of range while the scan keeps running. */
+    private val staleRunnable = object : Runnable {
+        override fun run() {
+            if (!scanning) return
+            val cutoff = System.currentTimeMillis() - OUT_OF_RANGE_MS
+            val updated = deviceList.map {
+                if (it.inRange && it.lastSeenMs < cutoff) it.copy(inRange = false, rssi = OUT_OF_RANGE_RSSI) else it
+            }
+            if (updated != deviceList) setDevices(sortDevices(updated))
+            mainHandler.postDelayed(this, STALE_TICK_MS)
+        }
+    }
+
     private val pollRunnable = object : Runnable {
         override fun run() {
             val currentSession = session
@@ -97,6 +147,7 @@ class AnkerBleManager(private val context: Context) {
     val devices: List<FoundDevice> get() = deviceList
     val telemetry: BatteryTelemetry get() = currentTelemetry
     val status: String get() = currentStatus
+    val isScanning: Boolean get() = scanning
 
     private fun setStatus(value: String) {
         currentStatus = value
@@ -142,8 +193,13 @@ class AnkerBleManager(private val context: Context) {
         setStatus("Bluetooth permission is required to find and connect to batteries.")
     }
 
-    fun startScan(autoConnect: Boolean = false) {
+    /**
+     * Scanning runs continuously whenever nothing is connected. Calling this while a scan is
+     * already running is a no-op unless [restart] is set, so callers can invoke it freely.
+     */
+    fun startScan(autoConnect: Boolean = false, restart: Boolean = false) {
         autoConnectOnNextScan = autoConnect
+        if (scanning && !restart) return
         if (!hasPermissions()) {
             reportPermissionDenied()
             return
@@ -163,13 +219,16 @@ class AnkerBleManager(private val context: Context) {
             return
         }
         if (scanning) scanner.stopScan(scanCallback)
-        setDevices(emptyList())
+        // Keep remembered devices listed; the stale tick marks them out of range if silent.
         setStatus("Scanning…")
         scanning = true
         scanner.startScan(scanCallback)
+        mainHandler.removeCallbacks(staleRunnable)
+        mainHandler.postDelayed(staleRunnable, STALE_TICK_MS)
     }
 
     fun stopScan() {
+        mainHandler.removeCallbacks(staleRunnable)
         if (!hasPermissions() || !scanning) return
         adapter?.bluetoothLeScanner?.stopScan(scanCallback)
         scanning = false
@@ -197,12 +256,18 @@ class AnkerBleManager(private val context: Context) {
             reportPermissionDenied()
             return
         }
+        // A remembered device carries no BluetoothDevice; resolve it by address.
+        val device = found.device ?: runCatching { adapter?.getRemoteDevice(found.address) }.getOrNull()
+        if (device == null) {
+            setStatus("Cannot connect to ${found.modelName} — Bluetooth address unavailable")
+            return
+        }
         stopScan()
         closeGatt()
         resetSessionState()
         connectAttempt = 1
         isConnecting = true
-        lastFoundDevice = found
+        lastFoundDevice = found.copy(device = device)
         session = createSessionFor(found.type)
         setStatus("Connecting to ${found.modelName}…")
         val (appName, appPkg) = getOfficialAppInfo(found.type)
@@ -215,7 +280,7 @@ class AnkerBleManager(private val context: Context) {
             officialAppPackage = appPkg
         )
         setTelemetry(initialTelemetry)
-        gatt = connectGattForAttempt(found, connectAttempt)
+        gatt = connectGattForAttempt(device, connectAttempt)
     }
 
     fun disconnect() {
@@ -249,18 +314,18 @@ class AnkerBleManager(private val context: Context) {
         }
     }
 
-    private fun connectGattForAttempt(found: FoundDevice, attempt: Int): BluetoothGatt {
+    private fun connectGattForAttempt(device: BluetoothDevice, attempt: Int): BluetoothGatt {
         return when {
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && attempt == 1 ->
-                found.device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK)
+                device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK)
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && attempt == 2 ->
-                found.device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-            else -> found.device.connectGatt(context, false, gattCallback)
+                device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            else -> device.connectGatt(context, false, gattCallback)
         }
     }
 
     private fun retryConnection(reasonStatus: Int) {
-        val found = lastFoundDevice ?: run {
+        val found = lastFoundDevice?.takeIf { it.device != null } ?: run {
             isConnecting = false
             setStatus("Bluetooth connection error: $reasonStatus")
             mainHandler.postDelayed({
@@ -282,7 +347,7 @@ class AnkerBleManager(private val context: Context) {
         closeGatt()
         resetSessionState()
         session = createSessionFor(found.type)
-        mainHandler.postDelayed({ gatt = connectGattForAttempt(found, connectAttempt) }, 700L)
+        mainHandler.postDelayed({ gatt = connectGattForAttempt(found.device!!, connectAttempt) }, 700L)
     }
 
     private fun createSessionFor(type: AnkerProtocol.DeviceType): BatterySession {
@@ -304,9 +369,15 @@ class AnkerBleManager(private val context: Context) {
             if (!AnkerProtocol.isAnkerLike(name, uuids)) return
             val type = AnkerProtocol.classifyDevice(name)
             val modelName = AnkerProtocol.modelNameFor(type)
-            val item = FoundDevice(name, modelName, type, result.device.address, result.rssi, result.device)
-            val updated = (deviceList.filterNot { it.address == item.address } + item).sortedByDescending { it.rssi }
-            setDevices(updated)
+            val now = System.currentTimeMillis()
+            val item = FoundDevice(name, modelName, type, result.device.address, result.rssi, result.device, now, inRange = true)
+            val existing = deviceList.firstOrNull { it.address == item.address }
+            val updated = sortDevices(deviceList.filterNot { it.address == item.address } + item)
+            // Advertisements arrive several times a second; only re-render when something visible changed.
+            val visibleChange = existing == null || !existing.inRange ||
+                signalBucket(existing.rssi) != signalBucket(item.rssi) || now - existing.lastSeenMs > 2_000L
+            if (visibleChange) setDevices(updated) else deviceList = updated
+            if (existing == null || now - lastCacheWriteMs > CACHE_REFRESH_MS) saveKnownDevices(updated)
 
             if (autoConnectOnNextScan && !currentTelemetry.connected && !isConnecting && gatt == null) {
                 autoConnectOnNextScan = false
@@ -322,6 +393,13 @@ class AnkerBleManager(private val context: Context) {
                 if (!currentTelemetry.connected && !isConnecting) startScan()
             }, 3000L)
         }
+    }
+
+    private fun signalBucket(rssi: Int): Int = when {
+        rssi >= -55 -> 3
+        rssi >= -70 -> 2
+        rssi >= -85 -> 1
+        else -> 0
     }
 
     private fun enableNotifications(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic): Boolean {
@@ -541,5 +619,13 @@ class AnkerBleManager(private val context: Context) {
                 handleNotification(value)
             }
         }
+    }
+
+    companion object {
+        private const val KEY_KNOWN = "devices"
+        private const val OUT_OF_RANGE_RSSI = -127
+        private const val OUT_OF_RANGE_MS = 12_000L
+        private const val STALE_TICK_MS = 4_000L
+        private const val CACHE_REFRESH_MS = 60_000L
     }
 }

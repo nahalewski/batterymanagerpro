@@ -69,7 +69,7 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         super.onResume()
         if (showingIntro) {
             introVideoView?.start()
-        } else if (!ble.telemetry.connected) {
+        } else if (!ble.telemetry.connected && !ble.isScanning) {
             ensurePermissionThenScan()
         }
     }
@@ -280,9 +280,7 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         hero.addView(text("POWER LINK", 12f, true, cyan))
         hero.addView(text("Battery command center", 26f, true))
         hero.addView(space(8))
-        hero.addView(text("Discover nearby battery packs and power stations to monitor charging telemetry in real time.", 14f, false, muted))
-        hero.addView(space(16))
-        hero.addView(neonButton("＋  Scan for batteries") { ensurePermissionThenScan() }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        hero.addView(text("Scanning automatically for nearby battery packs and power stations. Batteries you've connected before stay listed — tap one to connect.", 14f, false, muted))
         root.addView(hero)
         root.addView(space(14))
 
@@ -364,7 +362,7 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
                 background = gradientCard()
                 addView(text("No batteries detected", 18f, true))
                 addView(space(5))
-                addView(text("Tap Scan and keep the battery awake with Bluetooth enabled.", 13f, false, muted))
+                addView(text("Scanning… keep the battery awake with Bluetooth enabled.", 13f, false, muted))
             }
             deviceContainer.addView(empty)
             return
@@ -385,16 +383,33 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
                 addView(text(found.modelName, 17f, true))
                 addView(text(found.name, 11f, false, muted))
                 addView(space(4))
-                addView(text("●  Available", 12f, true, green))
-                addView(space(4))
-                val (sigText, sigColor) = formatSignalFriendly(found.rssi)
-                addView(text(sigText, 12f, true, sigColor))
+                if (found.inRange) {
+                    addView(text("●  Available", 12f, true, green))
+                    addView(space(4))
+                    val (sigText, sigColor) = formatSignalFriendly(found.rssi)
+                    addView(text(sigText, 12f, true, sigColor))
+                } else {
+                    addView(text("○  ${lastSeenLabel(found.lastSeenMs)}", 12f, true, muted))
+                    addView(space(4))
+                    addView(text("Out of range — tap to try connecting", 12f, false, muted))
+                }
             }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             c.addView(text("›", 34f, false, cyan).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(dp(32), dp(54)))
             c.setOnClickListener { ble.connect(found) }
             deviceContainer.addView(c, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = dp(12)
             })
+        }
+    }
+
+    private fun lastSeenLabel(ms: Long): String {
+        if (ms <= 0L) return "Seen before"
+        val mins = (System.currentTimeMillis() - ms) / 60_000L
+        return when {
+            mins < 1 -> "Last seen just now"
+            mins < 60 -> "Last seen ${mins}m ago"
+            mins < 1440 -> "Last seen ${mins / 60}h ago"
+            else -> "Last seen ${mins / 1440}d ago"
         }
     }
 
@@ -800,9 +815,14 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
             setPadding(dp(16), dp(16), dp(16), dp(16))
             addView(text("Quick actions", 18f, true))
             addView(space(10))
-            addView(neonButton("Scan for batteries") { currentTab = 0; showScanner(); ensurePermissionThenScan() })
+            addView(neonButton("Restart scan") { ble.startScan(restart = true); currentTab = 0; showScanner() })
             addView(space(10))
             addView(neonButton("Stop scan") { ble.stopScan(); Toast.makeText(this@MainActivity, "Scan stopped", Toast.LENGTH_SHORT).show(); renderCurrentTab() })
+            addView(space(10))
+            addView(neonButton("Forget remembered batteries", danger = true) {
+                ble.forgetKnownDevices()
+                Toast.makeText(this@MainActivity, "Remembered batteries cleared", Toast.LENGTH_SHORT).show()
+            })
             addView(space(10))
             addView(neonButton("Rescan & Auto-Connect") { ble.startScan(autoConnect = true); Toast.makeText(this@MainActivity, "Scanning for batteries to auto-connect...", Toast.LENGTH_SHORT).show(); renderCurrentTab() })
             addView(space(10))
