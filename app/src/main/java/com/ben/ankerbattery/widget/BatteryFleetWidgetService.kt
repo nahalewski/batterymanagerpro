@@ -67,7 +67,10 @@ class BatteryFleetRemoteViewsFactory(private val context: Context) : RemoteViews
                 val pwrText = when {
                     (d.totalInputW ?: 0.0) > 0.0 -> String.format(Locale.US, "IN %.0fW", d.totalInputW)
                     (d.totalOutputW ?: 0.0) > 0.0 -> String.format(Locale.US, "OUT %.0fW", d.totalOutputW)
-                    d.rssi != 0 -> "${d.rssi} dBm"
+                    d.rssi >= -55 -> "●●●● Excellent"
+                    d.rssi >= -70 -> "●●●○ Good"
+                    d.rssi >= -85 -> "●●○○ Fair"
+                    d.rssi != 0 -> "●○○○ Weak"
                     else -> "Ready"
                 }
                 views.setTextViewText(R.id.fleet_item_power, pwrText)

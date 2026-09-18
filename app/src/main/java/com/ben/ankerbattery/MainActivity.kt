@@ -386,8 +386,8 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
                 addView(space(4))
                 addView(text("●  Available", 12f, true, green))
                 addView(space(4))
-                addView(text("Signal  ${found.rssi} dBm", 13f, false, muted))
-                addView(text(found.address, 11f, false, muted))
+                val (sigText, sigColor) = formatSignalFriendly(found.rssi)
+                addView(text(sigText, 12f, true, sigColor))
             }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             c.addView(text("›", 34f, false, cyan).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(dp(32), dp(54)))
             c.setOnClickListener { ble.connect(found) }
@@ -397,9 +397,18 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         }
     }
 
+    private fun formatSignalFriendly(rssi: Int): Pair<String, Int> {
+        return when {
+            rssi >= -55 -> "Signal  ●●●●  Excellent" to green
+            rssi >= -70 -> "Signal  ●●●○  Good" to cyan
+            rssi >= -85 -> "Signal  ●●○○  Fair" to amber
+            else -> "Signal  ●○○○  Weak" to muted
+        }
+    }
+
     private fun showDashboard(t: BatteryTelemetry) {
         root = baseScreen()
-        val subtitle = if (t.connected) "${t.deviceName}  •  Connected" else t.deviceName
+        val subtitle = if (t.address.isNotBlank()) "${t.deviceName}  •  ${t.address}" else (if (t.connected) "${t.deviceName}  •  Connected" else t.deviceName)
         root.addView(titleBar(t.modelName, subtitle, true) {
             currentTab = 0
             showScanner()
@@ -453,12 +462,48 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         root.addView(space(6))
         root.addView(packetMonitorCard(t))
         root.addView(space(12))
+        root.addView(deviceInfoCard(t))
+        root.addView(space(12))
 
         statusText = pill(ble.status.ifBlank { "Connected" }, statusColor(ble.status))
         root.addView(statusText)
         root.addView(space(18))
         root.addView(bottomNav())
         setScrollable(root)
+    }
+
+    private fun deviceInfoCard(t: BatteryTelemetry): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = gradientCard(20)
+
+            val header = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            header.addView(text("DEVICE IDENTIFIERS", 12f, true, cyan), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            header.addView(pill("BLUETOOTH LE", cyanSoft))
+            addView(header)
+            addView(space(8))
+
+            val addrRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            addrRow.addView(text("MAC Address", 13f, false, muted), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addrRow.addView(text(if (t.address.isNotBlank()) t.address else "Unavailable", 13f, true, white))
+            addView(addrRow)
+            addView(space(4))
+
+            val modelRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            modelRow.addView(text("Hardware Model", 13f, false, muted), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            modelRow.addView(text(t.modelName, 13f, true, white))
+            addView(modelRow)
+        }
     }
 
     private fun firmwareDisclaimerCard(t: BatteryTelemetry): LinearLayout {
