@@ -3,147 +3,166 @@
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="horizontal"
-    android:gravity="center_vertical"
+    android:orientation="vertical"
     android:background="@drawable/widget_background"
-    android:paddingStart="16dp"
-    android:paddingEnd="16dp"
-    android:paddingTop="12dp"
-    android:paddingBottom="12dp">
+    android:paddingStart="14dp"
+    android:paddingEnd="14dp"
+    android:paddingTop="10dp"
+    android:paddingBottom="10dp">
 
-    <!-- Actual realistic battery UI image -->
-    <FrameLayout
+    <!-- Top Left Title -->
+    <TextView
         android:layout_width="wrap_content"
-        android:layout_height="match_parent"
-        android:layout_marginEnd="16dp">
-
-        <ImageView
-            android:id="@+id/widget_battery_device_img"
-            android:layout_width="86dp"
-            android:layout_height="match_parent"
-            android:src="@drawable/prime_20k"
-            android:scaleType="fitCenter"
-            android:contentDescription="Battery Hardware" />
-
-        <!-- Mini charge overlay pill -->
-        <TextView
-            android:id="@+id/widget_battery_pct_badge"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="bottom|center_horizontal"
-            android:text="88%"
-            android:textColor="#00DCFF"
-            android:textSize="12sp"
-            android:textStyle="bold"
-            android:background="@drawable/widget_pill_in_bg"
-            android:paddingStart="6dp"
-            android:paddingEnd="6dp"
-            android:paddingTop="2dp"
-            android:paddingBottom="2dp"
-            android:layout_marginBottom="2dp" />
-    </FrameLayout>
-
-    <!-- Expanded Telemetry Details -->
-    <LinearLayout
-        android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:text="Battery Manager Pro"
+        android:textColor="#00DCFF"
+        android:textSize="11sp"
+        android:textStyle="bold"
+        android:letterSpacing="0.04"
+        android:layout_marginBottom="4dp" />
+
+    <!-- Main Content Horizontal -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
         android:layout_weight="1"
-        android:orientation="vertical"
+        android:orientation="horizontal"
         android:gravity="center_vertical">
 
-        <!-- Brand & Model Header -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
+        <!-- Actual realistic battery UI image -->
+        <FrameLayout
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="14dp">
 
+            <ImageView
+                android:id="@+id/widget_battery_device_img"
+                android:layout_width="80dp"
+                android:layout_height="match_parent"
+                android:src="@drawable/prime_20k"
+                android:scaleType="fitCenter"
+                android:contentDescription="Battery Hardware" />
+
+            <!-- Mini charge overlay pill -->
             <TextView
-                android:id="@+id/widget_brand_badge"
+                android:id="@+id/widget_battery_pct_badge"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="ANKER"
+                android:layout_gravity="bottom|center_horizontal"
+                android:text="88%"
                 android:textColor="#00DCFF"
-                android:textSize="10sp"
+                android:textSize="11sp"
                 android:textStyle="bold"
                 android:background="@drawable/widget_pill_in_bg"
-                android:paddingStart="5dp"
-                android:paddingEnd="5dp"
-                android:paddingTop="1dp"
-                android:paddingBottom="1dp"
-                android:layout_marginEnd="6dp" />
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
+                android:paddingTop="2dp"
+                android:paddingBottom="2dp"
+                android:layout_marginBottom="2dp" />
+        </FrameLayout>
 
-            <TextView
-                android:id="@+id/widget_device_name"
-                android:layout_width="0dp"
+        <!-- Expanded Telemetry Details -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:gravity="center_vertical">
+
+            <!-- Brand & Model Header -->
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="20K Prime Power Bank"
-                android:textColor="#EEF8FF"
-                android:textSize="15sp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:id="@+id/widget_brand_badge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="ANKER"
+                    android:textColor="#00DCFF"
+                    android:textSize="9sp"
+                    android:textStyle="bold"
+                    android:background="@drawable/widget_pill_in_bg"
+                    android:paddingStart="5dp"
+                    android:paddingEnd="5dp"
+                    android:paddingTop="1dp"
+                    android:paddingBottom="1dp"
+                    android:layout_marginEnd="6dp" />
+
+                <TextView
+                    android:id="@+id/widget_device_name"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="20K Prime Power Bank"
+                    android:textColor="#EEF8FF"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:maxLines="1"
+                    android:ellipsize="end" />
+            </LinearLayout>
+
+            <!-- Status and Live Indicator -->
+            <TextView
+                android:id="@+id/widget_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="● Connected — Live Telemetry"
+                android:textColor="#00F5AA"
+                android:textSize="10sp"
                 android:textStyle="bold"
+                android:layout_marginTop="2dp" />
+
+            <!-- Power Badges Row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="6dp">
+
+                <TextView
+                    android:id="@+id/widget_input_watts"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="IN  0W"
+                    android:textColor="#70EBFF"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    android:background="@drawable/widget_pill_in_bg"
+                    android:paddingStart="7dp"
+                    android:paddingEnd="7dp"
+                    android:paddingTop="2dp"
+                    android:paddingBottom="2dp"
+                    android:layout_marginEnd="6dp" />
+
+                <TextView
+                    android:id="@+id/widget_output_watts"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="OUT  42W"
+                    android:textColor="#00DCFF"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    android:background="@drawable/widget_pill_out_bg"
+                    android:paddingStart="7dp"
+                    android:paddingEnd="7dp"
+                    android:paddingTop="2dp"
+                    android:paddingBottom="2dp" />
+            </LinearLayout>
+
+            <!-- Temperature & Remaining runtime -->
+            <TextView
+                android:id="@+id/widget_extra_info"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="28.5°C  •  2h 15m remaining"
+                android:textColor="#8EB0C2"
+                android:textSize="11sp"
+                android:layout_marginTop="5dp"
                 android:maxLines="1"
                 android:ellipsize="end" />
         </LinearLayout>
-
-        <!-- Status and Live Indicator -->
-        <TextView
-            android:id="@+id/widget_status"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="● Connected — Live Telemetry"
-            android:textColor="#00F5AA"
-            android:textSize="11sp"
-            android:textStyle="bold"
-            android:layout_marginTop="3dp" />
-
-        <!-- Power Badges Row -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="8dp">
-
-            <TextView
-                android:id="@+id/widget_input_watts"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="IN  0W"
-                android:textColor="#70EBFF"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:background="@drawable/widget_pill_in_bg"
-                android:paddingStart="8dp"
-                android:paddingEnd="8dp"
-                android:paddingTop="3dp"
-                android:paddingBottom="3dp"
-                android:layout_marginEnd="8dp" />
-
-            <TextView
-                android:id="@+id/widget_output_watts"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="OUT  42W"
-                android:textColor="#00DCFF"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:background="@drawable/widget_pill_out_bg"
-                android:paddingStart="8dp"
-                android:paddingEnd="8dp"
-                android:paddingTop="3dp"
-                android:paddingBottom="3dp" />
-        </LinearLayout>
-
-        <!-- Temperature & Remaining runtime -->
-        <TextView
-            android:id="@+id/widget_extra_info"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="28.5°C  •  2h 15m remaining"
-            android:textColor="#8EB0C2"
-            android:textSize="11sp"
-            android:layout_marginTop="6dp"
-            android:maxLines="1"
-            android:ellipsize="end" />
     </LinearLayout>
 </LinearLayout>

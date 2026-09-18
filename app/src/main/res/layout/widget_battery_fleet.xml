@@ -28,7 +28,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="BATTERY FLEET MONITOR"
+                android:text="Battery Manager Pro"
                 android:textColor="#EEF8FF"
                 android:textSize="13sp"
                 android:textStyle="bold"
@@ -38,7 +38,7 @@
                 android:id="@+id/widget_fleet_subtitle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Multi-Brand • Live Telemetry"
+                android:text="Fleet Monitor • Multi-Brand"
                 android:textColor="#00DCFF"
                 android:textSize="10sp"
                 android:textStyle="bold" />
