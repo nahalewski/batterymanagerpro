@@ -29,12 +29,35 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
 
     private data class PrimePort(val status: Int, val reading: PortReading)
 
+    /** Tracks which encryption/handshake the device actually uses on-the-wire.
+     *  Anker Prime 20K/26K/27K devices physically use SOLIX-style BLE handshake
+     *  (cmds 0801/0803/0829/0805/0821/4822), so we detect at runtime instead of
+     *  assuming based on device classification. */
+    private enum class NegotiationMode { UNKNOWN, SOLIX, PRIME }
+    private var negotiationMode = NegotiationMode.UNKNOWN
+
     private var sharedSecret: ByteArray? = null
     private var negotiated = false
     private var mtu = 253
+    /** ATT MTU negotiated on the link (default before onMtuChanged fires). */
+    private var linkMtu = 23
     private val fragmentBuffers = linkedMapOf<String, MutableList<Pair<Int, ByteArray>>>()
 
     override fun isNegotiated(): Boolean = negotiated
+
+    override fun onMtuChanged(mtu: Int) {
+        linkMtu = mtu
+    }
+
+    /** A device only fragments when a packet doesn't fit one notification, so every
+     *  non-final fragment arrives at (near) full size. Smaller packets are never fragments —
+     *  their first payload byte is ciphertext and must not be read as a fragment header. */
+    private fun couldBeFragment(rawSize: Int): Boolean = rawSize >= minOf(linkMtu, mtu) - 8
+
+    /** Prime devices using SOLIX negotiation require periodic status queries.
+     *  Pure-Prime-protocol devices are subscription-push-based (no poll needed). */
+    override fun isPollingRequired(): Boolean =
+        type.isPrime && negotiationMode == NegotiationMode.SOLIX
 
     override fun initialPacket(): ByteArray {
         return if (type.isPrime) {
@@ -49,11 +72,21 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
     }
 
     /**
-     * Query status command for SOLIX power stations (C200, C200X, C300, C800, C1000).
-     * Sends pattern 03000f, cmd 4040, param a1=0x21, param fe=timestamp (type 3).
-     * Device responds with c840 containing all telemetry fields.
+     * Periodic status request for SOLIX power stations. The C200 answers cmd 4200 with a
+     * full status dump (4a00) and then streams port readings (4303) for ~10 s, so this is
+     * re-sent by the poll loop to keep the stream alive.
      */
     override fun queryStatusPacket(): ByteArray {
+        return buildPacket(
+            "03000f",
+            "4200",
+            encodeParams(listOf(param("a1", hex("21")), param("fe", timestamp()))),
+            CryptoMode.SOLIX
+        )
+    }
+
+    /** Older 4040 status query used by AC-model layouts (C300/C800/C1000); the C200 ignores it. */
+    private fun legacyQueryStatusPacket(): ByteArray {
         return buildPacket(
             "03000f",
             "4040",
@@ -63,28 +96,36 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
     }
 
     /**
-     * Subscribe command for SOLIX streaming telemetry (cmd 4100).
+     * Subscribe to the main telemetry stream (cmd 4100). Newer-generation firmware
+     * (C1000 Gen 2, this C200) only accepts the bare payload a1=0x21 — no timestamp.
      */
-    fun subscribeSolixStreamPacket(): ByteArray {
-        return buildPacket(
-            "03000f",
-            "4100",
-            encodeParams(listOf(param("a1", hex("21")), param("fe", timestamp(), 3))),
-            CryptoMode.SOLIX
-        )
-    }
+    fun subscribeSolixStreamPacket(): ByteArray =
+        buildPacket("03000f", "4100", param("a1", hex("21")), CryptoMode.SOLIX)
+
+    /** Subscribe-and-keep-alive (cmd 420b) used by Prime chargers; same bare payload. */
+    private fun keepAlivePacket(): ByteArray =
+        buildPacket("03000f", "420b", param("a1", hex("21")), CryptoMode.SOLIX)
+
+    override fun pollPackets(): List<ByteArray> =
+        if (type.isPrime) listOfNotNull(queryStatusPacket())
+        else listOf(queryStatusPacket(), subscribeSolixStreamPacket(), keepAlivePacket())
 
     override fun onNotification(raw: ByteArray, current: BatteryTelemetry): Result {
-        val packet = parsePacket(raw) ?: return Result(status = "Ignored malformed BLE packet")
+        val packet = parsePacket(raw) ?: run {
+            Log.d("AnkerBle", "Malformed/partial BLE packet rawLen=${raw.size} raw=${raw.toHex()}")
+            return Result(status = "Ignored malformed BLE packet")
+        }
         val pattern = packet.pattern.toHex()
         val cmd = packet.cmd.toHex()
         var payload = packet.payload
 
-        Log.d("AnkerBle", "RX packet pattern=$pattern cmd=$cmd rawLen=${raw.size} payloadLen=${payload.size}")
+        Log.d("AnkerBle", "RX packet pattern=$pattern cmd=$cmd rawLen=${raw.size} payloadLen=${payload.size} payload=${payload.toHex()}")
 
-        val hasFrag = payload.isNotEmpty() && run {
-            val total = (payload[0].toInt() and 0xff) and 0x0f
-            total in 2..15
+        val hasFrag = payload.isNotEmpty() && couldBeFragment(raw.size) && run {
+            val frag = payload[0].toInt() and 0xff
+            val index = (frag ushr 4) and 0x0f
+            val total = frag and 0x0f
+            total in 2..15 && index <= total
         }
 
         if (hasFrag || fragmentBuffers.containsKey(pattern + cmd)) {
@@ -113,10 +154,25 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
     }
 
     private fun processNegotiation(cmd: String, encryptedOrPlain: ByteArray): Result {
-        return if (type.isPrime) {
-            processPrimeNegotiation(cmd, encryptedOrPlain)
-        } else {
-            processSolixNegotiation(cmd, encryptedOrPlain)
+        // Detect which handshake the device is actually using on the wire.
+        // Anker Prime devices sometimes respond with SOLIX-style cmds (0801/0821/4822),
+        // so we must route by the first received cmd rather than the device classification.
+        if (negotiationMode == NegotiationMode.UNKNOWN) {
+            negotiationMode = when {
+                cmd.startsWith("08") || cmd == "4822" -> {
+                    Log.d("AnkerBle", "Detected SOLIX-style negotiation (cmd=$cmd) for ${type.name}")
+                    NegotiationMode.SOLIX
+                }
+                cmd.startsWith("48") -> {
+                    Log.d("AnkerBle", "Detected PRIME-style negotiation (cmd=$cmd) for ${type.name}")
+                    NegotiationMode.PRIME
+                }
+                else -> NegotiationMode.SOLIX // fallback
+            }
+        }
+        return when (negotiationMode) {
+            NegotiationMode.PRIME -> processPrimeNegotiation(cmd, encryptedOrPlain)
+            else -> processSolixNegotiation(cmd, encryptedOrPlain)
         }
     }
 
@@ -131,30 +187,43 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
                 param("a1", timestamp()), param("a2", SOLIX_UUID.toByteArray()),
                 param("a3", hex("20")), param("a4", hex("00f0"))))
             "0803" -> {
-                params["a2"]?.legacy()?.let { if (it.isNotEmpty()) mtu = leInt(it) }
+                params.intVal("a2")?.takeIf { it in 23..517 }?.let { mtu = it }
                 packets += sendSolix("0029", listOf(param("a1", timestamp()), param("a2", SOLIX_UUID.toByteArray())))
             }
-            "0829" -> packets += sendSolix("0005", listOf(
-                param("a1", timestamp()), param("a2", SOLIX_UUID.toByteArray()),
-                param("a3", hex("20")), param("a4", hex("00f0")), param("a5", hex("40"))))
+            "0829" -> {
+                // Identity stage: a2 = chip ("ESP32"), a3 = firmware version, a4 = serial, a5 = MAC.
+                val firmware = params.asciiVal("a3")
+                Log.d("AnkerBle", "SOLIX identity: chip=${params.asciiVal("a2")} fw=$firmware serial=${params.asciiVal("a4")}")
+                packets += sendSolix("0005", listOf(
+                    param("a1", timestamp()), param("a2", SOLIX_UUID.toByteArray()),
+                    param("a3", hex("20")), param("a4", hex("00f0")), param("a5", hex("40"))))
+                return Result(packets, status = "Negotiating SOLIX session…", firmwareVersion = firmware)
+            }
             "0805" -> packets += sendSolix("0021", listOf(param("a1", hex(SOLIX_PUBLIC_KEY_BLOB))))
             "0821" -> {
                 val remote = params["a1"]?.legacy() ?: return Result(status = "SOLIX negotiation public key missing")
                 sharedSecret = deriveSharedSecret(SOLIX_PRIVATE_KEY, remote)
-                Log.d("AnkerBle", "Derived SOLIX shared secret successfully")
-                // Send stage 5 completion
+                Log.d("AnkerBle", "Derived SOLIX shared secret successfully (device=${type.name})")
+                // Stage 5: switch to the encrypted session. The device acks with 4822 and
+                // ignores session traffic sent before the 4027/4827 confirm, so wait for it.
                 packets += sendSolix("4022", listOf(
                     param("a1", timestamp()), param("a2", SOLIX_UUID.toByteArray()),
                     param("a3", hex("20")), param("a4", hex("00000000")), param("a5", POSIX_TZ.toByteArray())))
-                // Mark negotiated and immediately queue telemetry subscriptions/queries
-                negotiated = true
-                packets += subscribeSolixStreamPacket()
-                packets += queryStatusPacket()
-                return Result(packets, status = "Encrypted SOLIX session established — querying status…")
+                return Result(packets, status = "Securing SOLIX telemetry session…")
             }
-            "4822" -> {
+            "4822" -> packets += sendSolix("4027", listOf(param("a1", timestamp()), param("a2", SOLIX_UUID.toByteArray())))
+            "4827" -> {
                 negotiated = true
-                packets += queryStatusPacket()
+                packets += buildPacket("03000f", "4200", encodeParams(listOf(
+                    param("a1", hex("21")), param("fe", timestamp()))), CryptoMode.SOLIX)
+                packets += buildPacket("03000f", "420a", encodeParams(listOf(
+                    param("a1", hex("21")), param("a2", hex("044742")),
+                    param("a3", SOLIX_UUID.toByteArray(), 4), param("a5", hex("0101")),
+                    param("fe", timestamp()))), CryptoMode.SOLIX)
+                // Legacy AC-model queries (ignored by the C200; kept for C300/C800/C1000 layouts).
+                packets += subscribeSolixStreamPacket()
+                packets += keepAlivePacket()
+                packets += legacyQueryStatusPacket()
                 return Result(packets, status = "Encrypted SOLIX session established — querying status…")
             }
             else -> return Result(status = "SOLIX negotiation response $cmd")
@@ -166,16 +235,23 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
         val plain = decryptPrime(payload)
         val params = parseParams(plain)
         val packets = mutableListOf<ByteArray>()
+        Log.d("AnkerBle", "Prime negotiation stage cmd=$cmd plain=${plain.toHex()} params=${params.keys}")
         when (cmd) {
             "4801" -> packets += sendPrime("4003", listOf(
                 param("a1", timestamp()), param("a3", hex("20")), param("a4", hex("00f0"))))
             "4803" -> {
-                params["a2"]?.legacy()?.let { if (it.isNotEmpty()) mtu = leInt(it) }
+                params.intVal("a2")?.takeIf { it in 23..517 }?.let { mtu = it }
                 packets += sendPrime("4029", listOf(param("a1", timestamp())))
             }
-            "4829" -> packets += sendPrime("4005", listOf(
-                param("a1", timestamp()), param("a3", hex("20")), param("a4", hex("2901")),
-                param("a5", hex("44")), param("a6", hex("02"))))
+            "4829" -> {
+                // Identity stage: a2 = product line ("Charging"), a3 = firmware version, a4 = serial.
+                val firmware = params.asciiVal("a3")
+                Log.d("AnkerBle", "Prime identity: line=${params.asciiVal("a2")} fw=$firmware serial=${params.asciiVal("a4")}")
+                packets += sendPrime("4005", listOf(
+                    param("a1", timestamp()), param("a3", hex("20")), param("a4", hex("2901")),
+                    param("a5", hex("44")), param("a6", hex("02"))))
+                return Result(packets, status = "Negotiating Prime session…", firmwareVersion = firmware)
+            }
             "4805" -> packets += sendPrime("4021", listOf(param("a1", hex(PRIME_PUBLIC_KEY_BLOB))))
             "4821" -> {
                 val remote = params["a1"]?.legacy() ?: return Result(status = "Prime negotiation public key missing")
@@ -201,22 +277,70 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
     }
 
     private fun processSessionPacket(cmd: String, payload: ByteArray, current: BatteryTelemetry): Result {
-        val plain = when {
-            cmd == "0300" -> payload
-            type.isPrime -> decryptPrime(payload)
-            else -> decryptSolix(payload)
-        }
+        val plain = decryptSessionPayload(cmd, payload)
         val params = parseParams(plain)
-        Log.d("AnkerBle", "Decrypted session packet cmd=$cmd plainLen=${plain.size} tags=${params.keys}")
+        Log.d("AnkerBle", "Decrypted session packet cmd=$cmd mode=$negotiationMode plainLen=${plain.size} tags=${params.keys} plain=${plain.toHex()}")
 
         if (params.isEmpty()) return Result(status = "Live packet received ($cmd) — parsing…")
 
-        val updated = if (type.isPrime) {
-            decodePrime20k(params, current, payload)
-        } else {
-            decodeC200(params, current, payload)
+        val updated = when {
+            type.isPrime -> decodePrime20k(params, current, payload)
+            // AC-model layout carries battery in b7/bb; everything else uses the record-based layout.
+            params.containsKey("b7") || params.containsKey("bb") -> decodeC200(params, current, payload)
+            else -> decodeSolixRecords(cmd, params, current, payload)
         }
         return Result(telemetry = updated, status = "Live telemetry • $cmd")
+    }
+
+    /**
+     * SOLIX C200 (DC) layout, captured from the device:
+     *  - 4a00 (reply to 4200): a2 pack voltage, a6 battery %, a7..aa port records, ab..af input records.
+     *  - 4303 (1 Hz stream):  a2..a5 the same four port records, a6 u16.
+     * Port records share the Prime format (status, volts, amps, watts in 0.1 units). The two
+     * long records carry PD fields, so they are taken as the USB-C ports.
+     */
+    private fun decodeSolixRecords(cmd: String, p: Map<String, Param>, current: BatteryTelemetry, rawPayload: ByteArray): BatteryTelemetry {
+        val ports = when (cmd) {
+            "4a00" -> listOfNotNull(portRecord(p, "a7", "C1"), portRecord(p, "a8", "C2"), portRecord(p, "a9", "USB-A"), portRecord(p, "aa", "DC OUT"))
+            "4303" -> listOfNotNull(portRecord(p, "a2", "C1"), portRecord(p, "a3", "C2"), portRecord(p, "a4", "USB-A"), portRecord(p, "a5", "DC OUT"))
+            else -> emptyList()
+        }
+        val battery = if (cmd == "4a00") p.intVal("a6")?.takeIf { it in 0..100 }?.toDouble() else null
+        val totalIn = ports.filter { it.status == 2 }.sumOf { it.reading.watts ?: 0.0 }
+        val totalOut = ports.filter { it.status == 1 }.sumOf { it.reading.watts ?: 0.0 }
+
+        Log.d("AnkerBle", "Parsed SOLIX $cmd: batt=${battery ?: current.batteryPercent}% ports=${ports.map { "${it.reading.name}:${it.reading.watts}W@${it.reading.volts}V" }}")
+
+        return current.copy(
+            batteryPercent = battery ?: current.batteryPercent,
+            totalInputW = if (ports.isEmpty()) current.totalInputW else totalIn,
+            totalOutputW = if (ports.isEmpty()) current.totalOutputW else totalOut,
+            ports = if (ports.isEmpty()) current.ports else ports.map { it.reading },
+            lastPacketHex = rawPayload.toHex(),
+            packetsReceived = current.packetsReceived + 1,
+            lastUpdatedMs = System.currentTimeMillis()
+        )
+    }
+
+    private fun decryptSessionPayload(cmd: String, payload: ByteArray): ByteArray {
+        // The device pushes the 0300 status stream and the 0a00 capability dump in the clear.
+        if (cmd == "0300" || cmd == "0a00") return payload
+        // Use the actual negotiation mode for decryption — a Prime device that went through
+        // SOLIX handshake (0801/0821/4822) shares a SOLIX secret, not a Prime GCM secret.
+        return try {
+            when {
+                negotiationMode == NegotiationMode.PRIME -> decryptPrime(payload)
+                negotiationMode == NegotiationMode.SOLIX -> decryptSolix(payload)
+                type.isPrime -> decryptPrime(payload)   // fallback if mode not yet set
+                else -> decryptSolix(payload)
+            }
+        } catch (t: Throwable) {
+            // Unknown frames may also be plaintext TLV; accept them if they parse, else surface the error.
+            if (parseParams(payload).isNotEmpty()) {
+                Log.d("AnkerBle", "Session packet $cmd is not encrypted — parsing as plaintext")
+                payload
+            } else throw t
+        }
     }
 
     private fun decodePrime20k(p: Map<String, Param>, current: BatteryTelemetry, rawPayload: ByteArray): BatteryTelemetry {
@@ -225,9 +349,9 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
         val reportedOut = p.intLegacy("a6", 2, 4)?.div(10.0)
 
         val ports = listOfNotNull(
-            primePort(p, "a8", "C1"),
-            primePort(p, "a9", "C2"),
-            primePort(p, "ac", "USB-A")
+            portRecord(p, "a8", "C1"),
+            portRecord(p, "a9", "C2"),
+            portRecord(p, "ac", "USB-A")
         )
         val totalIn = ports.filter { it.status == 2 }.sumOf { it.reading.watts ?: 0.0 }.takeIf { it > 0.0 }
         val summedOut = ports.filter { it.status == 1 }.sumOf { it.reading.watts ?: 0.0 }.takeIf { it > 0.0 }
@@ -245,7 +369,7 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
         )
     }
 
-    private fun primePort(p: Map<String, Param>, tag: String, name: String): PrimePort? {
+    private fun portRecord(p: Map<String, Param>, tag: String, name: String): PrimePort? {
         val legacy = p[tag]?.legacy() ?: return null
         if (legacy.size < 8) return null
         val status = legacy[1].toInt() and 0xff
@@ -444,6 +568,10 @@ class AnkerSession(override val type: AnkerProtocol.DeviceType) : BatterySession
         if (b.isNotEmpty()) return b[0].toInt()
         return p.type?.toByte()?.toInt()
     }
+
+    private fun Map<String, Param>.asciiVal(tag: String): String? =
+        this[tag]?.legacy()?.toString(Charsets.US_ASCII)
+            ?.filter { it.code in 32..126 }?.trim()?.takeIf { it.isNotEmpty() }
 
     private fun Map<String, Param>.intLegacy(tag: String, begin: Int, end: Int? = null): Int? {
         val b = this[tag]?.legacy() ?: return null

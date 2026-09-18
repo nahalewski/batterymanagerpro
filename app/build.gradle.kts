@@ -11,8 +11,16 @@ android {
         applicationId = "com.ben.ankerbattery"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "1.1.0"
+        versionCode = 12
+        versionName = "1.2.0-beta.1"
+    }
+
+    buildTypes {
+        release {
+            // Beta builds are signed with the debug key so they can be side-loaded.
+            // Add a real keystore before any store submission.
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 
     compileOptions {

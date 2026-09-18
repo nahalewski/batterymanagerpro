@@ -20,6 +20,7 @@ import com.ben.ankerbattery.ble.AnkerBleManager
 import com.ben.ankerbattery.data.UsageLogger
 import com.ben.ankerbattery.model.BatteryTelemetry
 import com.ben.ankerbattery.protocol.AnkerProtocol
+import com.ben.ankerbattery.protocol.FirmwareCatalog
 import java.io.File
 import java.util.Locale
 
@@ -410,8 +411,10 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
         root = baseScreen()
         val subtitle = if (t.address.isNotBlank()) "${t.deviceName}  •  ${t.address}" else (if (t.connected) "${t.deviceName}  •  Connected" else t.deviceName)
         root.addView(titleBar(t.modelName, subtitle, true) {
+            // Leaving the dashboard drops the link; otherwise the next telemetry packet re-opens it.
             currentTab = 0
-            showScanner()
+            ble.disconnect()
+            ensurePermissionThenScan()
         })
         root.addView(space(12))
 
@@ -503,6 +506,22 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
             modelRow.addView(text("Hardware Model", 13f, false, muted), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             modelRow.addView(text(t.modelName, 13f, true, white))
             addView(modelRow)
+            addView(space(4))
+
+            val fwRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val fw = t.firmwareVersion
+            val fwLabel = when {
+                fw == null -> "Not reported" to muted
+                t.updateAvailable -> "$fw  •  Update available" to amber
+                FirmwareCatalog.latestFor(AnkerProtocol.classifyDevice(t.modelName)) != null -> "$fw  •  Up to date" to green
+                else -> fw to white
+            }
+            fwRow.addView(text("Firmware", 13f, false, muted), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            fwRow.addView(text(fwLabel.first, 13f, true, fwLabel.second))
+            addView(fwRow)
         }
     }
 
@@ -523,8 +542,9 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
             addView(headerRow)
             addView(space(8))
 
+            val latest = FirmwareCatalog.latestFor(AnkerProtocol.classifyDevice(t.modelName))
             addView(text(
-                "A new firmware update is available for ${t.modelName} (Current: ${t.firmwareVersion ?: "v1.0.0"}).",
+                "${t.modelName} is running ${t.firmwareVersion ?: "an unknown version"}; version ${latest ?: "--"} is available.",
                 13f, true, white
             ))
             addView(space(6))
@@ -784,7 +804,7 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
             addView(space(10))
             addView(neonButton("Stop scan") { ble.stopScan(); Toast.makeText(this@MainActivity, "Scan stopped", Toast.LENGTH_SHORT).show(); renderCurrentTab() })
             addView(space(10))
-            addView(neonButton("Rescan & Auto-Connect") { ble.startScan(); Toast.makeText(this@MainActivity, "Scanning for batteries to auto-connect...", Toast.LENGTH_SHORT).show(); renderCurrentTab() })
+            addView(neonButton("Rescan & Auto-Connect") { ble.startScan(autoConnect = true); Toast.makeText(this@MainActivity, "Scanning for batteries to auto-connect...", Toast.LENGTH_SHORT).show(); renderCurrentTab() })
             addView(space(10))
             addView(neonButton("Clear saved history") {
                 logger.clear()
@@ -900,8 +920,8 @@ class MainActivity : Activity(), AnkerBleManager.Listener {
 
     override fun onTelemetryChanged(telemetry: BatteryTelemetry) {
         runOnUiThread {
-            if (telemetry.connected && currentTab == 0) showDashboard(telemetry)
-            else if (currentTab != 0) renderCurrentTab()
+            // Home tab follows the connection state: dashboard while connected, scanner otherwise.
+            renderCurrentTab()
             val now = telemetry.lastUpdatedMs
             if (now > 0L && now - lastLoggedAt >= 5_000L) {
                 lastLoggedAt = now

@@ -15,6 +15,7 @@ import com.ben.ankerbattery.model.BatteryTelemetry
 import com.ben.ankerbattery.protocol.AnkerProtocol
 import com.ben.ankerbattery.protocol.AnkerSession
 import com.ben.ankerbattery.protocol.BatterySession
+import com.ben.ankerbattery.protocol.FirmwareCatalog
 import com.ben.ankerbattery.protocol.ugreen.UgreenProtocol
 import com.ben.ankerbattery.protocol.ugreen.UgreenSession
 import com.ben.ankerbattery.protocol.bluetti.BluettiProtocol
@@ -67,16 +68,24 @@ class AnkerBleManager(private val context: Context) {
     private var session: BatterySession? = null
     private val writeQueue = ArrayDeque<ByteArray>()
     private var writeInProgress = false
+    // Connecting is tap-driven; only the explicit "Rescan & Auto-Connect" action sets this.
+    private var autoConnectOnNextScan = false
 
     private val pollRunnable = object : Runnable {
         override fun run() {
             val currentSession = session
             if (gatt != null && currentSession != null && currentSession.isNegotiated()) {
-                if (!currentSession.type.isPrime) {
+                // Non-Prime SOLIX devices need periodic queryStatusPacket polls.
+                // Prime devices that negotiated via SOLIX also benefit from periodic polls
+                // (their subscription push may not arrive without a keep-alive query).
+                // Pure-Prime-protocol devices are subscription-based — no poll needed.
+                val needsPoll = !currentSession.type.isPrime || currentSession.isPollingRequired()
+                if (needsPoll) {
                     if (!writeInProgress && writeQueue.isEmpty()) {
-                        currentSession.queryStatusPacket()?.let {
-                            Log.d("AnkerBle", "Polling status update...")
-                            enqueueWrite(it)
+                        val packets = currentSession.pollPackets()
+                        if (packets.isNotEmpty()) {
+                            Log.d("AnkerBle", "Polling status update (${packets.size} packets)...")
+                            enqueueWrites(packets)
                         }
                     }
                 }
@@ -133,7 +142,8 @@ class AnkerBleManager(private val context: Context) {
         setStatus("Bluetooth permission is required to find and connect to batteries.")
     }
 
-    fun startScan() {
+    fun startScan(autoConnect: Boolean = false) {
+        autoConnectOnNextScan = autoConnect
         if (!hasPermissions()) {
             reportPermissionDenied()
             return
@@ -196,17 +206,15 @@ class AnkerBleManager(private val context: Context) {
         session = createSessionFor(found.type)
         setStatus("Connecting to ${found.modelName}…")
         val (appName, appPkg) = getOfficialAppInfo(found.type)
+        // Firmware is unknown until the device reports it during the handshake.
         val initialTelemetry = BatteryTelemetry(
             deviceName = found.name,
             modelName = found.modelName,
             address = found.address,
-            firmwareVersion = "v1.2.0",
-            updateAvailable = true,
             officialAppName = appName,
             officialAppPackage = appPkg
         )
         setTelemetry(initialTelemetry)
-        NotificationHelper.notifyFirmwareUpdate(context, initialTelemetry)
         gatt = connectGattForAttempt(found, connectAttempt)
     }
 
@@ -300,8 +308,8 @@ class AnkerBleManager(private val context: Context) {
             val updated = (deviceList.filterNot { it.address == item.address } + item).sortedByDescending { it.rssi }
             setDevices(updated)
 
-            // Auto-connect to detected battery if not connected or connecting
-            if (!currentTelemetry.connected && !isConnecting && gatt == null) {
+            if (autoConnectOnNextScan && !currentTelemetry.connected && !isConnecting && gatt == null) {
+                autoConnectOnNextScan = false
                 Log.d("AnkerBle", "Auto-connecting to detected battery: ${item.modelName} (${item.address})")
                 connect(item)
             }
@@ -375,17 +383,26 @@ class AnkerBleManager(private val context: Context) {
         val s = session ?: return
         val result = s.onNotification(value, currentTelemetry)
         result.status?.let { setStatus(it) }
+        result.firmwareVersion?.let { fw ->
+            val type = lastFoundDevice?.type ?: AnkerProtocol.DeviceType.UNKNOWN
+            val updated = currentTelemetry.copy(
+                firmwareVersion = fw,
+                updateAvailable = FirmwareCatalog.isUpdateAvailable(type, fw)
+            )
+            Log.d("AnkerBle", "Device firmware $fw, latest known ${FirmwareCatalog.latestFor(type)}, update=${updated.updateAvailable}")
+            setTelemetry(updated)
+            NotificationHelper.notifyFirmwareUpdate(context, updated)
+        }
         result.telemetry?.let {
             val (appName, appPkg) = lastFoundDevice?.type?.let { t -> getOfficialAppInfo(t) } ?: (null to null)
             val merged = it.copy(
-                firmwareVersion = it.firmwareVersion ?: currentTelemetry.firmwareVersion ?: "v1.2.0",
-                updateAvailable = true,
+                firmwareVersion = it.firmwareVersion ?: currentTelemetry.firmwareVersion,
+                updateAvailable = currentTelemetry.updateAvailable,
                 officialAppName = it.officialAppName ?: currentTelemetry.officialAppName ?: appName,
                 officialAppPackage = it.officialAppPackage ?: currentTelemetry.officialAppPackage ?: appPkg
             )
             Log.d("AnkerBle", "Updating telemetry: batt=${merged.batteryPercent}% in=${merged.totalInputW}W out=${merged.totalOutputW}W ports=${merged.ports.size}")
             setTelemetry(merged)
-            NotificationHelper.notifyFirmwareUpdate(context, merged)
         }
         if (result.packetsToWrite.isNotEmpty()) enqueueWrites(result.packetsToWrite)
     }
@@ -397,6 +414,7 @@ class AnkerBleManager(private val context: Context) {
                 return
             }
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.d("AnkerBle", "Connection state error status=$status newState=$newState")
                 setTelemetry(currentTelemetry.copy(connected = false))
                 closeGatt(gatt)
                 retryConnection(status)
@@ -410,8 +428,9 @@ class AnkerBleManager(private val context: Context) {
                     if (!gatt.requestMtu(247)) gatt.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    Log.d("AnkerBle", "Link disconnected (status=$status)")
                     isConnecting = false
-                    setStatus("Disconnected — auto-reconnecting…")
+                    setStatus("Disconnected — scanning for batteries…")
                     setTelemetry(currentTelemetry.copy(connected = false))
                     closeGatt(gatt)
                     mainHandler.postDelayed({
@@ -424,6 +443,10 @@ class AnkerBleManager(private val context: Context) {
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d("AnkerBle", "Link MTU negotiated: $mtu")
+                session?.onMtuChanged(mtu)
+            }
             gatt.discoverServices()
         }
 
@@ -433,6 +456,9 @@ class AnkerBleManager(private val context: Context) {
                 return
             }
             val characteristics = gatt.services.flatMap { it.characteristics }
+            gatt.services.forEach { svc ->
+                Log.d("AnkerBle", "GATT service ${svc.uuid}: ${svc.characteristics.joinToString { "${it.uuid} props=${it.properties}" }}")
+            }
             val currentDevice = lastFoundDevice
             when {
                 currentDevice?.type?.isBluetti == true -> {
